@@ -16,4 +16,7 @@ a synthetic spectrogram is generated and can be compared to measurements.
 ## example script
 comp_primary_from_spec.ipynb : compares synthetic microseisms at Geoscope station EDA for year 2023 with measurements. This uses an equivalent area dA for the bottom-wave interactions over which both the bottom and wave spectra are assumed homogeneions 
 
+## installation
+git clone --quiet https://github.com/ardhuin/microseisms_LOPS
+
 ## more later
