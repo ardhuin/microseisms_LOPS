@@ -9,9 +9,9 @@ This repository is not designed to be as user friendly as WMSAN (https://github.
 Using information about: 
 - ocean waves (wind-generated waves) : ideally we need the full frequency-direction spectrum E(f,theta). Assuming some directional distribution one could also use E(f), making the manipulation of maps of sources a bit easier. Note that maps of E(f,theta) can be obtained from ECMWF (either for the ERA5 reanalysis or the operational forecasts, more on this later... ) 
 - bottom topography                  : reprensented by a bottom elevation PSD (see Ardhuin 2018). 
-- solid Earth structure              : represented by a C2 (as in Longuet-Higgins 1950) coupling coefficient, here based on a solid half-space (the water layer can be neglected due to the interaction in relatively shallow water) 
+- solid Earth structure              : represented by a C2 (as in Longuet-Higgins 1950) coupling coefficient, here based on a solid half-space (the water layer can be neglected due to the interaction in relatively shallow water), and attenuation coeffients (Q) and a propagation term meant to reprensent source and receiver site effects. 
 
-a synthetic spectrogram is generated and can be compared to measurements
+a synthetic spectrogram is generated and can be compared to measurements.
 
 ## example script
 comp_primary_from_spec.ipynb : compares synthetic microseisms at Geoscope station EDA for year 2023 with measurements. This uses an equivalent area dA for the bottom-wave interactions over which both the bottom and wave spectra are assumed homogeneions 
