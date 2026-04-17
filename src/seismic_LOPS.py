@@ -2,6 +2,7 @@ import numpy as np
 import os
 import datetime
 import netCDF4
+import h5py  
 from netCDF4 import Dataset
 import xarray as xr
 from scipy.interpolate import interp1d
@@ -117,7 +118,7 @@ def seismic_define_C2(readc, CgR):
 
 
 
-
+###########################################################################
 def dispNewtonTH(f, dep):
     """
     Inverts the linear dispersion relation (2*pi*f)^2 = g*k*tanh(k*dep)
@@ -145,7 +146,7 @@ def dispNewtonTH(f, dep):
     X = np.sqrt(Y)         # initial guess that fits deep water
     
     # mask: only apply Newton iteration where needed
-    mask = X < 8
+    mask = X < 6
 
     if np.any(mask):
         F = np.ones_like(X[mask])
@@ -157,7 +158,7 @@ def dispNewtonTH(f, dep):
 
     return X / dep
 
-
+###########################################################################
 def dist_sphere(lon1, lon2, lat1, lat2):
     # Haversine formula for spherical distance in degrees
     R = 6371.0
@@ -172,7 +173,7 @@ def dist_sphere(lon1, lon2, lat1, lat2):
 
 ###########################################################################
 # --- Main function ---
-def seismic_response_primary_sandwaves(
+def seismic_response_primary_sandwaves_spec(
         wave_spectrum,
         bottom_topography_spectrum,
         dpt, lat, lon, CgR, Q, #date1, date2,
@@ -216,12 +217,14 @@ def seismic_response_primary_sandwaves(
     #times = np.linspace(date1, date2, nt)
 
     # --- read wave spectrum file ---
-    ds = Dataset(wave_spectrum, 'r')
+    #ds = Dataset(wave_spectrum, 'r')
+    ds = xr.open_dataset(wave_spectrum)
     freqp = np.array(ds.variables['frequency'][:])
     theta = np.array(ds.variables['direction'][:])
+    #print('theta:',theta)
     times = ds.variables['time'][:]
-    lonp  = ds.variables['longitude'][0,0] # assumes fixed position
-    latp  = ds.variables['latitude'][0,0]
+    lonp  = ds.variables['longitude'][0,0].values # assumes fixed position
+    latp  = ds.variables['latitude'][0,0].values
     dptpall = ds.variables['dpt'][:]
     efthall = ds.variables['efth']
         
@@ -231,8 +234,7 @@ def seismic_response_primary_sandwaves(
     
     xfr = np.exp(np.log(freqp[nf - 1] / freqp[0]) / (nf - 1))  # geometric progression factor
     df = freqp * 0.5 * (xfr - 1.0 / xfr)                       # frequency intervals in wave model
-
-
+    dth = (2*np.pi/nd)   # direction increment in rad
     
     omega = 2*np.pi*freqp
 
@@ -279,6 +281,7 @@ def seismic_response_primary_sandwaves(
     F_delta = np.zeros((nt, nf))
     Fx_delta= np.zeros((nt, nf))
     Fy_delta= np.zeros((nt, nf))
+    Ef = np.zeros((nt, nf))
 
 
     # intermediate transfer functions
@@ -311,7 +314,7 @@ def seismic_response_primary_sandwaves(
             else:
                 alphas[i] = -1.0
 
-            Eftop1f[:,i] = botspeci[:,i] * (rhow*g*k0*alphas[i]/np.cosh(kh))**2 * (2*np.pi/nd)
+            Eftop1f[:,i] = botspeci[:,i] * (rhow*g*k0*alphas[i]/np.cosh(kh))**2 * dth
 
             #print('TEST Eftop1f:',i,freqp[i],dpt,omega[i]**2,g*k0*np.tanh(kh),(rhow*g*k0*alphas[i]/np.cosh(kh))**2 * (2*np.pi/nd),k0,alphas[i],np.sum(botspeci[:,i]),np.sum(Eftop1f[:,i]) )
 
@@ -356,6 +359,7 @@ def seismic_response_primary_sandwaves(
         #    print('I ...',it,i,p1f[i],chk1[i],chk2[i],coeff_all[i])
         t1xf= np.sum(Eftop1f*efth*(np.sin(theta*dtor)[:,None]**2)/(alphas[None,:]**2), axis=0)
         t1yf= np.sum(Eftop1f*efth*(np.cos(theta*dtor)[:,None]**2)/(alphas[None,:]**2), axis=0)
+        Ef[it,:]=np.sum(efth,axis=0)* dth
 
         source = coeff_all * p1f
         sourcex= coeff_all_love * t1xf
@@ -366,7 +370,410 @@ def seismic_response_primary_sandwaves(
         Fy_delta[it,:]= sourcey
         
 
-    return F_delta, Fx_delta, Fy_delta, freqp, df, times
+    return F_delta, Fx_delta, Fy_delta, Ef, freqp, df, times
+
+
+###########################################################################
+# --- Main function ---
+def seismic_response_primary_sandwaves_ef_point(
+        wave_spectrum,
+        bottom_topography_spectrum,
+        dpt, lat, lon, CgR, Q, #date1, date2,
+        lono, lato, dA, statname):
+    
+    
+    g    = 9.81
+    rhow = 1026
+    rhos = 2600
+    betas= 2800
+    R_E  = 4e7/(2*np.pi)
+
+    # --- read bottom topo spectrum ---
+    with open(bottom_topography_spectrum, "r") as f:
+        A = np.fromfile(f, sep=" ")
+
+    # first two = integers, next two = reals
+    nkbx = int(A[0])
+    nkby = int(A[1])
+    dkbx = float(A[2])
+    dkby = float(A[3])
+
+    nvals = nkbx * nkby
+    flat = A[4:4 + nvals]
+    if flat.size != nvals:
+        raise ValueError(f"Expected {nvals} values for botspec, found {flat.size}")
+    botspec = flat.reshape((nkby, nkbx), order="F").T  # -> shape (nkbx, nkby)
+    
+
+    kbxmax = ((nkbx - nkbx%2)/2.0) * dkbx
+    kbymax = ((nkby - nkby%2)/2.0) * dkby
+    kbotx = np.linspace(-kbxmax, kbxmax, nkbx)
+    kboty = np.linspace(-kbymax - (1-nkby%2)*dkby, kbymax, nkby)
+
+    # --- seismic coefficients ---
+    C2, nC2, c = seismic_define_C2(0, CgR)
+    factor1 = 2*np.pi * (1/rhos)**2 / (betas**5 * R_E)
+
+    # --- time axis ---
+    #nt = int((date2-date1)/dt) + 1
+    #times = np.linspace(date1, date2, nt)
+
+    # --- read wave spectrum file ---
+    #ds = Dataset(wave_spectrum, 'r')
+    ds = xr.open_dataset(wave_spectrum)
+    
+    freqp = np.array(ds.variables['f'][:])
+    times = ds.variables['time'][:]
+    efall = ds.variables['ef']
+    
+    
+    lon_idx = np.abs(ds.longitude - lon).argmin().item()
+    lat_idx = np.abs(ds.latitude - lat).argmin().item()
+ 
+    lonp=ds.longitude[lon_idx].values
+    latp=ds.latitude[lat_idx].values
+
+    print("Nearest longitude:", lon,lonp)
+    print("Nearest latitude:", lat,latp)
+    
+        
+    nf = len(freqp)
+    nd = 24 #len(theta)
+    theta = np.linspace(0, 360 - 360/nd, nd)
+    nt = len(times)
+    
+    xfr = np.exp(np.log(freqp[nf - 1] / freqp[0]) / (nf - 1))  # geometric progression factor
+    df = freqp * 0.5 * (xfr - 1.0 / xfr)                       # frequency intervals in wave model
+
+    omega = 2*np.pi*freqp
+
+    alpha = dist_sphere(lono, lonp, lato, latp) * (np.pi/180)
+    print('alpha:',alpha,xfr)
+    dtor = np.pi/180
+    k = dispNewtonTH(freqp, dpt)
+
+
+# 5. Pre-computes Efth spectrum to pressure transformation 
+
+    botspeci = np.zeros((nd, nf))
+    botspecm = np.zeros((nf))
+
+    dtor = np.pi / 180.0
+
+    for i in range(nf):
+        for j in range(nd):
+            # compute wave-number components in x and y
+            kbx = k[i] * np.sin(theta[j] * dtor)
+            kby = k[i] * np.cos(theta[j] * dtor)
+
+            # wavenumber in grid units 
+            kbotxi = (kbxmax + kbx) / dkbx
+            kbotyi = (kbymax + kby) / dkby
+            # clamp indices (Python 0-based vs MATLAB 1-based)
+            ibk = max(min(int(np.floor(kbotxi)), nkbx - 2), 0)
+            jbk = max(min(int(np.floor(kbotyi)), nkby - 2), 0)
+
+            # fractional part for bilinear interpolation
+            xbk = kbotxi - np.floor(kbotxi)
+            ybk = kbotyi - np.floor(kbotyi)
+
+            # bilinear interpolation of bottom spectrum onto wave wavenumber 
+            botspeci[j, i] = (
+                (botspec[ibk, jbk] * (1 - ybk) + botspec[ibk, jbk + 1] * ybk) * (1 - xbk)
+                + (botspec[ibk + 1, jbk] * (1 - ybk) + botspec[ibk + 1, jbk + 1] * ybk) * xbk
+            )
+            botspecm[i] = botspecm[i]+botspeci[j, i]/nd
+            #print('Testing bottom spectrum:',i,j,ibk,jbk,freqp[i],k[i],dkbx,dkby,kbxmax,kbx,kby,botspeci[j, i])
+
+
+
+    # outputs
+    F_delta = np.zeros((nt, nf))
+    Ef      = np.zeros((nt, nf))
+
+    # intermediate transfer functions
+    Efthtop1f = np.zeros((nd,nf))
+    Eftop1f = np.zeros(nf)
+    alphas = np.zeros(nf)
+
+    coeff = np.ones(nf)
+    coeff_all = np.ones(nf)
+    attenuation = np.ones(nf)
+   
+        
+    for i in range(nf):
+            om = omega[i]
+            k0 = k[i]
+            h0 = dpt #dptpall[0,it]
+            kh = k0*dpt
+
+            if kh < 7:
+                sinh2kh=np.sinh(2*kh)
+                dkdD=-2*k0**2/(2*kh+ sinh2kh)
+                dkDdD=k0*np.sinh(2*kh)/(2*kh+ sinh2kh)
+                Cg=om/k0*0.5*(1+(2*kh)/sinh2kh)
+                dCgdD=om/k0*(dkDdD/sinh2kh-2*kh*dkDdD*np.cosh(2*kh)/(sinh2kh**2))-dkdD*om/k0**2*0.5*(1+(2*kh)/sinh2kh)
+                alpha1=-(k0+h0*dkdD)*np.tanh(k0*h0)/k0
+                alpha2=-0.5*dCgdD/(Cg*k0)
+                alpha3=-dkdD/(k0**2)
+                alphas[i] = alpha1+alpha2+alpha3
+            else:
+                alphas[i] = -1.0
+
+            #Efthtop1f[:,i] = botspeci[:,i] * (rhow*g*k0*alphas[i]/np.cosh(kh))**2
+            #p1f = np.sum(Eftop1f*efth, axis=0)  = sum (Efthtop1f)
+            
+            #Eftop1f[i]=np.sum(Efthtop1f[:,i])/nd * 3  # factor 3 corrects for anisotropy ??? 
+            
+            Eftop1f[i]=botspecm[i] * (rhow*g*k0*alphas[i]/np.cosh(kh))**2  * 3  # factor 3 corrects for anisotropy ??? 
+            #print('TEST Eftop1f:',i,freqp[i],dpt,omega[i]**2,g*k0*np.tanh(kh),(rhow*g*k0*alphas[i]/np.cosh(kh))**2 * (2*np.pi/nd),k0,alphas[i],np.sum(botspeci[:,i]),np.sum(Eftop1f[:,i]) )
+
+            omehoverbeta=0*omega[i]*dpt/betas;   # set to zero because interaction in shallow water
+            # gets the nearest discretized omega*h/beta
+            ind = (100.0 * omehoverbeta).astype(int)
+            if ind > nC2-1: 
+                ind= nC2-1
+            coeff[i] = (factor1 * omega[i] * C2[ind]) / np.sin(alpha)
+  
+            # attenuation for one orbit
+            b = np.exp(-omega[i] * (2.0 * np.pi) * (R_E / (abs(CgR) * Q[i])))
+
+            # terms for shorter arc
+            attenuation[i] = np.exp(-omega[i] * alpha * (R_E / (abs(CgR) * Q[i]))) / (1.0 - b)
+
+            # terms for longer arc
+            attenuation[i] += np.exp(-omega[i] * (2.0 * np.pi - alpha) * (R_E / (abs(CgR) * Q[i]))) / (1.0 - b)
+
+
+            coeff_all[i] = coeff[i] * attenuation[i] * dA
+            #print('TEST COEF:',i,C2[ind],coeff[i],'##',attenuation[i],'##',dA,'##',coeff_all[i])
+    
+    #print('TEST:',Eftop1f,'##',coeff_all)
+    # main loop over time steps 
+    #print('TEST2:',np.shape(efall))
+    for it in range(nt):
+        #itf = int(round((times[it]-times[0])/dt))
+
+        ef = 10**(efall[it,:,lat_idx,lon_idx].values)-1E-12
+        Ef[it,:]=ef
+
+        p1f = Eftop1f*ef
+        chk1 = Eftop1f
+        chk2 = ef
+     #   for i in range(nf):
+     #       print('I ...',it,i,p1f[i],chk1[i],chk2[i],coeff_all[i])
+
+        source = coeff_all * p1f
+
+        F_delta[it,:] = source
+        
+
+    return F_delta, Ef, freqp, df, times
+
+
+###########################################################################
+# --- Main function ---
+def seismic_response_primary_sandwaves_ef_map(
+        wave_spectrum,
+        bottom_topography_spectrum,
+        dpt_map, indlon, indlat, CgR, Q, #date1, date2,
+        lono, lato, dA, statname):
+    
+    
+    g    = 9.81
+    rhow = 1026
+    rhos = 2600
+    betas= 2800
+    R_E  = 4e7/(2*np.pi)
+    dtor = np.pi/180
+
+
+    # --- read bottom topo spectrum ---
+    with open(bottom_topography_spectrum, "r") as f:
+        A = np.fromfile(f, sep=" ")
+
+    # first two = integers, next two = reals
+    nkbx = int(A[0])
+    nkby = int(A[1])
+    dkbx = float(A[2])
+    dkby = float(A[3])
+
+    nvals = nkbx * nkby
+    flat = A[4:4 + nvals]
+    if flat.size != nvals:
+        raise ValueError(f"Expected {nvals} values for botspec, found {flat.size}")
+    botspec = flat.reshape((nkby, nkbx), order="F").T  # -> shape (nkbx, nkby)
+    
+
+    kbxmax = ((nkbx - nkbx%2)/2.0) * dkbx
+    kbymax = ((nkby - nkby%2)/2.0) * dkby
+    kbotx = np.linspace(-kbxmax, kbxmax, nkbx)
+    kboty = np.linspace(-kbymax - (1-nkby%2)*dkby, kbymax, nkby)
+
+    # --- seismic coefficients ---
+    C2, nC2, c = seismic_define_C2(0, CgR)
+    factor1 = 2*np.pi * (1/rhos)**2 / (betas**5 * R_E)
+
+    # --- time axis ---
+    #nt = int((date2-date1)/dt) + 1
+    #times = np.linspace(date1, date2, nt)
+
+    # --- read wave spectrum file ---
+    #ds = Dataset(wave_spectrum, 'r')
+    ds = xr.open_dataset(wave_spectrum)
+    
+    freqp = np.array(ds.variables['f'][:])
+    times = ds.variables['time'][:]
+    efall = ds.variables['ef']
+    lon   =ds.variables['longitude']
+    lat   =ds.variables['latitude']
+    dxdy=(lon[1].values-lon[0].values)*(lat[1].values-lat[0].values)*(dtor*R_E)**2
+    [nt,nf,ny,nx]=np.shape(efall) 
+    nys=len(indlat)
+    nxs=len(indlon)
+    
+    print('SIZE:',nt,nf,ny,nx,dxdy)
+            
+    nd = 24 #len(theta)
+    theta = np.linspace(0, 360 - 360/nd, nd)
+    
+    xfr = np.exp(np.log(freqp[nf - 1] / freqp[0]) / (nf - 1))  # geometric progression factor
+    df = freqp * 0.5 * (xfr - 1.0 / xfr)                       # frequency intervals in wave model
+
+    omega = 2*np.pi*freqp
+    
+    alpha_map=np.zeros((ny,nx))+10
+    k_map=np.ones((nf,ny,nx))  # maybe we should not use the full grid ...  but a masked grid ... 
+    for indy in indlat: 
+        for indx in indlon: 
+            if (dpt_map[indy,indx] > 0) : 
+                alpha_map[indy,indx] = dist_sphere(lono, lon[indx].values, lato, lat[indy].values) * (np.pi/180)
+                if (dpt_map[indy,indx] < 1000.):
+                    print('lon, lat, alpha; depth:',indx,indy,lon[indx].values,lat[indy].values, alpha_map[indy,indx],dpt_map[indy,indx])
+                k_map[0:nf,indy,indx] = dispNewtonTH(freqp[0:nf], dpt_map[indy,indx])
+ 
+
+
+# 5. Pre-computes Efth spectrum to pressure transformation 
+
+    botspeci = np.zeros((ny,nx))
+    botspec_map = np.zeros((nf,ny,nx))
+
+    dtor = np.pi / 180.0
+    ifmax=20
+    for i in range(ifmax):
+     print('Computing bottom spectra for frequency:',i,freqp[i])
+     for iy in indlat:
+      for ix in indlon:
+       for j in range(nd):
+        # Get integer indices (clamped)
+  
+        # compute wave-number components in x and y
+        kbx = k_map[i,iy,ix] * np.sin(theta[j] * dtor)
+        kby = k_map[i,iy,ix] * np.cos(theta[j] * dtor)
+
+        # wavenumber in grid units 
+        kbotxi = (kbxmax + kbx) / dkbx
+        kbotyi = (kbymax + kby) / dkby
+  
+        ibk = max(min(int(np.floor(kbotxi)), nkbx - 2), 0)
+        jbk = max(min(int(np.floor(kbotyi)), nkby - 2), 0)
+
+        # Fractional part
+        xbk = kbotxi - np.floor(kbotxi)
+        ybk = kbotyi - np.floor(kbotyi)
+
+        # Bilinear interpolation
+        botspeci = (
+            (botspec[ibk, jbk]     * (1 - ybk) + botspec[ibk, jbk + 1]     * ybk) * (1 - xbk)
+          + (botspec[ibk + 1, jbk] * (1 - ybk) + botspec[ibk + 1, jbk + 1] * ybk) * xbk
+        )
+
+        # Accumulate result
+        botspec_map[i, iy, ix] += botspeci / nd
+        
+    # outputs
+    F_delta = np.zeros((nt, nf))
+    Ef      = np.zeros((nt, nf))
+
+    # intermediate transfer functions
+    Efthtop1f = np.zeros((nd,nf))
+    Eftop1f = np.zeros((nf,ny,nx))
+    alphas = np.ones((nf,ny,nx))
+
+    coeff = np.ones(nf)
+    coeff_all = np.ones((nf,ny,nx))
+    source= np.zeros((nf,ny,nx))
+        
+    for i in range(ifmax):
+       om = omega[i]
+       h0 = dpt_map #dptpall[0,it]
+       print('Computing wave to bottom coupling for freq:',i,freqp[i])
+            
+       for indy in indlat: 
+          dA=dxdy*np.cos(lat[indy]*dtor)
+          for indx in indlon: 
+           if (dpt_map[indy,indx] > 1): 
+            k0 = k_map[i,indy,indx]
+            kh = k0*dpt_map[indy,indx]
+            
+            if kh < 7:
+                sinh2kh=np.sinh(2*kh)
+                dkdD=-2*k0**2/(2*kh+ sinh2kh)
+                dkDdD=k0*np.sinh(2*kh)/(2*kh+ sinh2kh)
+                Cg=om/k0*0.5*(1+(2*kh)/sinh2kh)
+                dCgdD=om/k0*(dkDdD/sinh2kh-2*kh*dkDdD*np.cosh(2*kh)/(sinh2kh**2))-dkdD*om/k0**2*0.5*(1+(2*kh)/sinh2kh)
+                alpha1=-(kh*dkdD)*np.tanh(kh)/k0
+                alpha2=-0.5*dCgdD/(Cg*k0)
+                alpha3=-dkdD/(k0**2)
+                alphas[i,:,:] = alpha1+alpha2+alpha3
+            else:
+                alphas[i,:,:] = -1.0
+
+            #Efthtop1f[:,i] = botspeci[:,i] * (rhow*g*k0*alphas[i]/np.cosh(kh))**2
+            #p1f = np.sum(Eftop1f*efth, axis=0)  = sum (Efthtop1f)
+            
+            #Eftop1f[i]=np.sum(Efthtop1f[:,i])/nd * 3  # factor 3 corrects for anisotropy ??? 
+            
+            Eftop1f[i,indy,indx]=botspec_map[i,indy,indx] * (rhow*g*k0*alphas[i,indy,indx]/np.cosh(kh))**2  * 3  # factor 3 corrects for anisotropy ??? 
+            #print('TEST Eftop1f:',i,freqp[i],dpt,omega[i]**2,g*k0*np.tanh(kh),(rhow*g*k0*alphas[i]/np.cosh(kh))**2 * (2*np.pi/nd),k0,alphas[i],np.sum(botspeci[:,i]),np.sum(Eftop1f[:,i]) )
+
+            omehoverbeta=0*omega[i]*dpt_map[indy,indx]/betas;   # set to zero because interaction in shallow water
+            # gets the nearest discretized omega*h/beta
+            ind = (100.0 * omehoverbeta).astype(int)
+            if ind > nC2-1: 
+                ind= nC2-1
+            coeff[i] = (factor1 * omega[i] * C2[ind]) / np.sin(alpha_map[indy,indx])
+  
+            # attenuation for one orbit
+            b = np.exp(-omega[i] * (2.0 * np.pi) * (R_E / (abs(CgR) * Q[i])))
+
+            # terms for shorter arc
+            attenuation = np.exp(-omega[i] * alpha_map[indy,indx] * (R_E / (abs(CgR) * Q[i]))) / (1.0 - b)
+
+            # terms for longer arc
+            attenuation += np.exp(-omega[i] * (2.0 * np.pi - alpha_map[indy,indx]) * (R_E / (abs(CgR) * Q[i]))) / (1.0 - b)
+
+            
+            coeff_all[i,indy,indx] = coeff[i] * attenuation * dA
+            #print('TEST COEF:',i,C2[ind],coeff[i],'##',attenuation[i],'##',dA,'##',coeff_all[i])
+    
+    indf=range(ifmax)
+    for it in range(nt):
+        #itf = int(round((times[it]-times[0])/dt))
+        if (np.mod(it,6)==0):
+            print('time:',it,times[it].values)
+        ef = 10**(efall[it,0:ifmax,indlat,indlon].values)-1E-12
+
+
+        source = coeff_all[np.ix_(indf,indlat, indlon)] * Eftop1f[np.ix_(indf,indlat, indlon)]*np.squeeze(ef)
+
+        F_delta[it,0:ifmax] = np.nansum(source,axis=(1, 2))
+        if (it==9*24):
+            print('storing maps for time:',times[it].values)
+            map_source=source
+
+    return F_delta, botspec_map, k_map, map_source, freqp, df, times
 
 
 ##########################################################
@@ -1522,3 +1929,42 @@ def compute_delta_obs(spectre0, frq0, freqs,ifmin, ifmax,date0,times,smooth=1,pe
            else: 
               delta_obs[it]=np.nanmin(dsi1[inds])
     return delta_obs
+    
+
+def import_synthetic_mat(file)     :
+    data = h5py.File(file,'r')
+    #for k in data.keys():
+    #    print(k+' = data["'+k+'"]')
+    
+    base_date = np.datetime64('2023-01-01')
+
+    # Get the float array for time in days since the base date
+    t_datenum = np.array(data["times"])- 738887.
+
+    # Subtract 19358 (reference day) and convert to timedelta64 in days
+    timedelta = np.array(t_datenum*86400 , dtype='timedelta64[s]')  # Use 'timedelta64[D]'
+
+    # Add timedelta to base_date to get corresponding datetime64 values
+    timeo = base_date + timedelta
+    print(timeo[0],timeo[-1])
+    freq=np.squeeze(np.array(data['freqp']).T)
+    return np.squeeze(timeo),freq,np.array(data['Ef_pris']),np.squeeze(np.array(data['Q'])),np.squeeze(np.array(data['lato'])),np.squeeze(np.array(data['lono']))
+
+def read_sismo_npz(file):
+    data=np.load(file)
+    # Base reference date: January 1st, 2023
+    base_date = np.datetime64('2023-01-01')
+
+    # Get the float array for time in days since the base date
+    t_datenum = data["t_datenum"]- 19358.
+
+    # Subtract 19358 (reference day) and convert to timedelta64 in days
+    timedelta = np.array(t_datenum*86400 , dtype='timedelta64[s]')  # Use 'timedelta64[D]'
+
+    # Add timedelta to base_date to get corresponding datetime64 values
+    timeo = base_date + timedelta
+    print(np.shape( data["spec"]))
+    # Return the processed datetime, frequency, and spectrogram data
+    #return timeo, data["freq"][20:20+323], data["spec"].T    
+    return timeo, data["freq"][0:323], data["spec"].T    
+
